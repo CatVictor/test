@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# Variáveis principais
+NGINX_CONF="/etc/nginx/conf.d/mining_pools.conf" # Caminho do arquivo de configuração
+POOL_CONFIG_FILE="/tmp/pool_config.txt" # Arquivo temporário para configuração dos pools
+
+# Função para configurar os pools
+configurar_pools() {
+  rm -f "$POOL_CONFIG_FILE" # Limpa o arquivo de configuração anterior
+
+  pool_num=1
+  while true; do
+    read -p "Digite o endereço do pool $pool_num (ex: eth-kr.flexpool.io:5555 ou 'fim' para terminar): " pool_addr
+    if [[ "$pool_addr" == "fim" ]]; then
+      break
+    fi
+
+    # Validação básica do formato do endereço (pode ser aprimorada)
+    if [[ ! "$pool_addr" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
+      echo "Formato de endereço inválido. Use host:porta."
+      continue
+    fi
+
+    echo "$pool_addr" >> "$POOL_CONFIG_FILE"
+    ((pool_num++))
+  done
+}
+
+# Função para gerar o arquivo de configuração do Nginx
+gerar_config_nginx() {
+  if [[ ! -f "$POOL_CONFIG_FILE" ]]; then
+    echo "Nenhum pool configurado."
+    return 1
+  fi
+
+  cat > "$NGINX_CONF" << EOF
+upstream backend {
+  # Balanceamento round-robin (pode ser alterado para consistent hash se necessário)
+  $(while read pool; do echo "  server $pool;"; done < "$POOL_CONFIG_FILE")
+}
+
+server {
+  listen 80; # Porta padrão, pode ser alterada
+  server_name _; # Nome do servidor, pode ser configurado
+
+  location / {
+    proxy_pass http://backend;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+}
+EOF
+
+  echo "Arquivo de configuração Nginx gerado em $NGINX_CONF"
+}
+
+# Função principal
+main() {
+  # Verifica se o Nginx está instalado
+  if ! command -v nginx &>/dev/null; then
+    echo "Nginx não está instalado. Instale o Nginx primeiro (ex: apt install nginx ou yum install nginx)."
+    exit 1
+  fi
+
+  configurar_pools
+  gerar_config_nginx
+
+  # Testa a configuração do Nginx
+  nginx -t
+  if [[ $? -ne 0 ]]; then
+    echo "Erro na configuração do Nginx. Verifique o arquivo $NGINX_CONF"
+    exit 1
+  fi
+
+  # Reinicia o Nginx para aplicar as mudanças
+  systemctl restart nginx
+  echo "Nginx reiniciado."
+}
+
+main
