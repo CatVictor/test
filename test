@@ -1,0 +1,164 @@
+#!/bin/bash
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Função para exibir mensagens
+print_message() {
+    echo -e "${2}[${1}]${NC} ${3}"
+}
+
+# Função para verificar status do proxy
+check_proxy_status() {
+    local port=$1
+    local domain=$2
+
+    echo -e "\n${BLUE}=== Verificando Status do Proxy ===${NC}"
+
+    # Verifica se o Nginx está rodando
+    if systemctl is-active --quiet nginx; then
+        print_message "OK" "$GREEN" "Serviço Nginx está ativo"
+    else
+        print_message "ERRO" "$RED" "Serviço Nginx não está rodando"
+        return 1
+    fi
+
+    # Verifica se a configuração do proxy existe
+    if [ -f "/etc/nginx/stream.d/mining_${port}.conf" ]; then
+        print_message "OK" "$GREEN" "Configuração do proxy encontrada"
+    else
+        print_message "ERRO" "$RED" "Configuração do proxy não encontrada"
+        return 1
+    fi
+
+    # Verifica se a porta está em uso
+    if netstat -tuln | grep ":${port}" >/dev/null; then
+        print_message "OK" "$GREEN" "Porta ${port} está ativa"
+    else
+        print_message "ERRO" "$RED" "Porta ${port} não está ativa"
+        return 1
+    fi
+
+    # Se um domínio foi especificado, verifica o SSL
+    if [ ! -z "$domain" ]; then
+        if [ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]; then
+            print_message "OK" "$GREEN" "Certificado SSL encontrado para ${domain}"
+        else
+            print_message "AVISO" "$YELLOW" "Certificado SSL não encontrado para ${domain}"
+        fi
+    fi
+
+    # Testa a conexão com a pool
+    if nc -zv rvn.kryptex.network 7777 2>/dev/null; then
+        print_message "OK" "$GREEN" "Conexão com a pool de mineração está funcionando"
+    else
+        print_message "ERRO" "$RED" "Não foi possível conectar à pool de mineração"
+        return 1
+    fi
+
+    echo -e "\n${GREEN}=== Proxy está funcionando corretamente ===${NC}"
+    if [ ! -z "$domain" ]; then
+        echo -e "${GREEN}Use a seguinte URL no seu minerador: stratum+tcp://${domain}:${port}${NC}"
+    else
+        echo -e "${GREEN}Use a seguinte URL no seu minerador: stratum+tcp://seu_ip:${port}${NC}"
+    fi
+    return 0
+}
+
+[... resto do código anterior continua igual ...]
+
+# Função para adicionar proxy com domínio personalizado
+add_mining_proxy_with_domain() {
+    print_message "INFO" "$YELLOW" "Configurando proxy para mineração com domínio personalizado..."
+    
+    read -p "Digite seu domínio (ex: pool.seudominio.com): " custom_domain
+    read -p "Digite a porta que será usada (ex: 7777): " local_port
+    
+    # Configuração da pool Kryptex RVN
+    pool_host="rvn.kryptex.network"
+    pool_port="7777"
+    
+    # Cria arquivo de configuração do stream
+    cat > /etc/nginx/stream.d/mining_${local_port}.conf <<EOL
+upstream mining_pool_${local_port} {
+    server ${pool_host}:${pool_port};
+}
+
+server {
+    listen ${local_port};
+    proxy_pass mining_pool_${local_port};
+}
+EOL
+
+    # Configuração HTTP para o domínio (página de status)
+    cat > /etc/nginx/sites-available/${custom_domain} <<EOL
+server {
+    listen 80;
+    server_name ${custom_domain};
+
+    location / {
+        return 200 'Proxy de mineração ativo em: stratum+tcp://${custom_domain}:${local_port}';
+        add_header Content-Type text/plain;
+    }
+}
+EOL
+
+    # Habilita o site
+    ln -sf /etc/nginx/sites-available/${custom_domain} /etc/nginx/sites-enabled/
+
+    # Configura SSL com Certbot
+    print_message "INFO" "$YELLOW" "Configurando certificado SSL para ${custom_domain}..."
+    certbot --nginx -d ${custom_domain} --non-interactive --agree-tos --email admin@${custom_domain} --redirect
+
+    # Recarrega a configuração do Nginx
+    if systemctl reload nginx; then
+        print_message "SUCESSO" "$GREEN" "Configuração do Nginx recarregada"
+        # Verifica o status do proxy
+        check_proxy_status "$local_port" "$custom_domain"
+    else
+        print_message "ERRO" "$RED" "Falha ao recarregar o Nginx"
+        print_message "ERRO" "$RED" "Verifique os logs com: systemctl status nginx"
+        return 1
+    fi
+}
+
+# Menu principal atualizado
+show_menu() {
+    clear
+    echo "=== Gerenciador de Proxy Reverso Nginx ==="
+    echo "1. Instalar Nginx"
+    echo "2. Configurar Proxy Reverso"
+    echo "3. Adicionar Proxy com Domínio (Kryptex RVN)"
+    echo "4. Remover Proxy de Mineração"
+    echo "5. Verificar Status do Proxy"
+    echo "6. Desinstalar Nginx"
+    echo "0. Sair"
+    echo "========================================"
+    read -p "Escolha uma opção: " option
+    
+    case $option in
+        1) install_nginx ;;
+        2) configure_proxy ;;
+        3) add_mining_proxy_with_domain ;;
+        4) remove_mining_proxy ;;
+        5) 
+           read -p "Digite a porta do proxy: " check_port
+           read -p "Digite o domínio (opcional): " check_domain
+           check_proxy_status "$check_port" "$check_domain"
+           ;;
+        6) uninstall_nginx ;;
+        0) exit 0 ;;
+        *) print_message "ERRO" "$RED" "Opção inválida!" ;;
+    esac
+    
+    read -p "Pressione ENTER para continuar..."
+    show_menu
+}
+
+# Verifica se é root e inicia o menu
+check_root
+show_menu
